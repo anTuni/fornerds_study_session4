@@ -158,37 +158,24 @@ jobs:
           FRONTEND_DEP_FAILED: ${{ needs.dependency-scan.outputs.frontend_failed }}
         run: python .github/scripts/security_report.py
 
-  # ── 5. 관리자 승인 대기 (HIGH/CRITICAL 발견 시) ──────────────────
-  admin-gate:
-    name: "🔐 Admin Approval Required"
-    needs: report
-    if: needs.report.outputs.has_blockers == 'true'
-    runs-on: ubuntu-latest
-    environment: security-review   # GitHub Settings > Environments 에서 required reviewer 설정 필요
-    steps:
-      - name: Admin approval confirmed
-        run: echo "✅ 관리자 보안 검토 승인 완료"
-
-  # ── 6. 최종 보안 게이트 ───────────────────────────────────────────
+  # ── 5. 최종 보안 게이트 ───────────────────────────────────────────
+  # Branch Protection Rules에서 이 Job을 Required status check로 등록해야 함:
+  # Settings > Branches > defend/YUN > Require status checks > "🚦 Security Gate"
+  # + Require approvals (1명 이상) 설정으로 관리자 수동 승인 강제
   security-gate:
     name: "🚦 Security Gate"
-    needs: [report, admin-gate]
+    needs: report
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Evaluate gate
         env:
           HAS_BLOCKERS: ${{ needs.report.outputs.has_blockers }}
-          ADMIN_GATE: ${{ needs.admin-gate.result }}
         run: |
           if [ "$HAS_BLOCKERS" = "true" ]; then
-            if [ "$ADMIN_GATE" = "success" ]; then
-              echo "✅ 관리자 승인 완료. 머지 가능합니다."
-            else
-              echo "❌ HIGH/CRITICAL 취약점 발견. 관리자 승인이 필요합니다."
-              echo "PR 코멘트의 보안 감사 리포트를 확인하고 취약점을 수정하세요."
-              exit 1
-            fi
+            echo "❌ HIGH/CRITICAL 취약점 발견. PR 코멘트의 보안 감사 리포트를 확인하세요."
+            echo "취약점을 수정하거나 관리자가 PR을 직접 Approve해야 머지할 수 있습니다."
+            exit 1
           else
             echo "✅ 보안 감사 통과. 머지 가능합니다."
           fi
