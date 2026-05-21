@@ -1,0 +1,262 @@
+name: Security Audit (defend/tuni)
+
+on:
+  pull_request:
+    branches:
+      - defend/tuni
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+jobs:
+  backend-dependency-check:
+    name: Backend - OWASP Dependency Check
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.scan.outcome }}
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Run Maven tests
+        working-directory: backend
+        run: mvn -B test
+
+      - name: Run OWASP Dependency-Check (Maven)
+        id: scan
+        working-directory: backend
+        run: |
+          mvn -B org.owasp:dependency-check-maven:check \
+            -DfailBuildOnCVSS=7.0 \
+            -DsuppressFailureOnError=false \
+            -Dformats=HTML,JSON,SARIF
+
+      - name: Upload backend OWASP report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-owasp-report
+          path: |
+            backend/target/dependency-check-report.html
+            backend/target/dependency-check-report.json
+            backend/target/dependency-check-report.sarif
+          if-no-files-found: warn
+          retention-days: 30
+
+  frontend-npm-audit:
+    name: Frontend - npm audit
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.audit.outcome }}
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Run npm audit (JSON)
+        id: audit-json
+        if: always()
+        working-directory: frontend
+        run: |
+          npm audit --json > npm-audit-report.json || true
+          npm audit > npm-audit-report.txt || true
+
+      - name: Fail on high or critical vulnerabilities
+        id: audit
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
+      - name: Upload frontend audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-npm-audit-report
+          path: |
+            frontend/npm-audit-report.json
+            frontend/npm-audit-report.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+  semgrep-sast:
+    name: SAST - Semgrep (OWASP Top 10)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep (OWASP Top 10 rulesets)
+        run: |
+          semgrep ci \
+            --config p/owasp-top-ten \
+            --config p/security-audit \
+            --config p/java \
+            --config p/javascript \
+            --config p/typescript \
+            --sarif --output=semgrep.sarif \
+            --json --output=semgrep.json \
+            --error || echo "SEMGREP_FAILED=true" >> $GITHUB_ENV
+
+      - name: Upload Semgrep report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-sast-report
+          path: |
+            semgrep.sarif
+            semgrep.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Fail if Semgrep found issues
+        if: env.SEMGREP_FAILED == 'true'
+        run: |
+          echo "::error::Semgrep detected security findings. See semgrep-sast-report artifact for details."
+          exit 1
+
+  trivy-fs-scan:
+    name: Trivy - Filesystem Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy (filesystem, vuln + secret + misconfig)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          scanners: vuln,secret,misconfig
+
+      - name: Run Trivy (JSON report, always)
+        if: always()
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: json
+          output: trivy-results.json
+          severity: CRITICAL,HIGH,MEDIUM
+          scanners: vuln,secret,misconfig
+
+      - name: Upload Trivy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-report
+          path: |
+            trivy-results.sarif
+            trivy-results.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  build-final-report:
+    name: Aggregate Security Report
+    needs:
+      - backend-dependency-check
+      - frontend-npm-audit
+      - semgrep-sast
+      - trivy-fs-scan
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+
+      - name: Download all scan artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: reports
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Generate consolidated Markdown report
+        env:
+          BACKEND_STATUS: ${{ needs.backend-dependency-check.result }}
+          FRONTEND_STATUS: ${{ needs.frontend-npm-audit.result }}
+          SEMGREP_STATUS: ${{ needs.semgrep-sast.result }}
+          TRIVY_STATUS: ${{ needs.trivy-fs-scan.result }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node .github/scripts/build-security-report.mjs
+
+      - name: Upload consolidated security report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: |
+            security-report.md
+            reports/**
+          retention-days: 30
+
+      - name: Publish report to PR step summary
+        run: cat security-report.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment report on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('security-report.md', 'utf8');
+            const marker = '<!-- security-audit-report -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            const finalBody = `${marker}\n${body}`;
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body: finalBody });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body: finalBody });
+            }
+
+      - name: Fail aggregate job if any scan failed
+        env:
+          BACKEND_STATUS: ${{ needs.backend-dependency-check.result }}
+          FRONTEND_STATUS: ${{ needs.frontend-npm-audit.result }}
+          SEMGREP_STATUS: ${{ needs.semgrep-sast.result }}
+          TRIVY_STATUS: ${{ needs.trivy-fs-scan.result }}
+        run: |
+          echo "backend=$BACKEND_STATUS frontend=$FRONTEND_STATUS semgrep=$SEMGREP_STATUS trivy=$TRIVY_STATUS"
+          if [ "$BACKEND_STATUS" != "success" ] || \
+             [ "$FRONTEND_STATUS" != "success" ] || \
+             [ "$SEMGREP_STATUS" != "success" ] || \
+             [ "$TRIVY_STATUS" != "success" ]; then
+            echo "::error::One or more security scans detected vulnerabilities. This PR is blocked from merging."
+            exit 1
+          fi
+          echo "All security scans passed."
