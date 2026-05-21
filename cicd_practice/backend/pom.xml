@@ -53,6 +53,20 @@
             <artifactId>spring-security-test</artifactId>
             <scope>test</scope>
         </dependency>
+
+        <!-- A06 Vulnerable and Outdated Components — pinned to known-vulnerable versions. -->
+        <!-- CVE-2015-7501: commons-collections 3.2.1 RCE via unsafe deserialization (CVSS 9.8). -->
+        <dependency>
+            <groupId>commons-collections</groupId>
+            <artifactId>commons-collections</artifactId>
+            <version>3.2.1</version>
+        </dependency>
+        <!-- Multiple CVEs in old log4j 1.2.x (e.g. CVE-2019-17571, CVE-2022-23307). -->
+        <dependency>
+            <groupId>log4j</groupId>
+            <artifactId>log4j</artifactId>
+            <version>1.2.17</version>
+        </dependency>
     </dependencies>
 
     <build>

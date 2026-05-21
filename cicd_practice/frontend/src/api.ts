@@ -26,6 +26,12 @@ export interface CommentItem {
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8080';
 
+// A02 Cryptographic Failures — hardcoded credentials in source.
+// Triggers Gitleaks and Semgrep p/secrets rules.
+export const ANALYTICS_API_KEY = 'analytics_token_DO_NOT_COMMIT_EXAMPLE_VALUE_a1b2c3d4e5f6g7h8';
+export const ADMIN_BACKDOOR_TOKEN = 'admin_backdoor_DO_NOT_COMMIT_EXAMPLE_VALUE_z9y8x7w6v5u4t3s2';
+export const ADMIN_SIGNING_SECRET = 'signing_key_DO_NOT_COMMIT_EXAMPLE_VALUE_p0o9i8u7y6t5r4e3w2q1';
+
 export class ApiClient {
   constructor(private token: string | null) {}
 

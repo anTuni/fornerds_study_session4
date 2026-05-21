@@ -15,7 +15,11 @@
     "typescript": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "lucide-react": "latest"
+    "lucide-react": "latest",
+    "lodash": "4.17.4",
+    "minimist": "1.2.0",
+    "node-fetch": "2.6.0",
+    "marked": "0.3.6"
   },
   "devDependencies": {
     "@eslint/js": "latest",
