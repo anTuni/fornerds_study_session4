@@ -85,4 +85,19 @@ public class UserAccount {
     public void deactivate() {
         this.active = false;
     }
+
+    public void updateProfile(String email, String displayName, Role role, Boolean active) {
+        if (email != null) {
+            this.email = email;
+        }
+        if (displayName != null) {
+            this.displayName = displayName;
+        }
+        if (role != null) {
+            this.role = role;
+        }
+        if (active != null) {
+            this.active = active;
+        }
+    }
 }

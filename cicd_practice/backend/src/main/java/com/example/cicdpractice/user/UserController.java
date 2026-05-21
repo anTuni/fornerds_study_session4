@@ -4,9 +4,11 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import java.util.List;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -34,7 +36,17 @@ public class UserController {
         return UserSummary.from(users.save(user));
     }
 
+    @PutMapping("/me")
+    public UserSummary updateMe(@AuthenticationPrincipal UserPrincipal principal, @Valid @RequestBody ProfileUpdateRequest request) {
+        UserAccount user = users.findById(principal.account().getId()).orElseThrow();
+        user.updateProfile(request.email(), request.displayName(), request.role(), request.active());
+        return UserSummary.from(users.save(user));
+    }
+
     public record RoleChangeRequest(@NotNull Role role) {
+    }
+
+    public record ProfileUpdateRequest(String email, String displayName, Role role, Boolean active) {
     }
 
     public record UserSummary(Long id, String email, String displayName, Role role, boolean active) {
