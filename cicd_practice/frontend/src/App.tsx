@@ -93,7 +93,7 @@ export function App() {
                     <strong>{content.title}</strong>
                     <span>{content.status} · {content.authorName}</span>
                   </div>
-                  <p>{content.body}</p>
+                  <p dangerouslySetInnerHTML={{ __html: content.body }} />
                 </article>
               ))}
             </div>
