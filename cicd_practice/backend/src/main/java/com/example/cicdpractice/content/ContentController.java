@@ -65,10 +65,10 @@ public class ContentController {
     }
 
     @PutMapping("/{id}")
-    @PreAuthorize("hasAnyRole('ADMIN', 'EDITOR')")
     public ContentResponse update(@AuthenticationPrincipal UserPrincipal principal, @PathVariable Long id, @Valid @RequestBody ContentRequest request) {
+        // VULN A01 Broken Access Control: removed @PreAuthorize and author check.
+        // Any authenticated user can now edit any content, including admin posts.
         Content content = contents.findById(id).orElseThrow();
-        assertCanEdit(principal.account(), content);
         content.update(request.title(), request.body(), request.status());
         return ContentResponse.from(contents.save(content));
     }
