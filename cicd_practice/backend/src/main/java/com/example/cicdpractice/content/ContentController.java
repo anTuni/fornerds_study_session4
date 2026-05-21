@@ -14,6 +14,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -78,6 +79,16 @@ public class ContentController {
         Content content = contents.findById(id).orElseThrow();
         Comment comment = comments.save(Comment.create(content, principal.account(), request.message()));
         return CommentResponse.from(comment);
+    }
+
+    @DeleteMapping("/{id}/comments/{commentId}")
+    @PreAuthorize("hasAnyRole('ADMIN', 'EDITOR')")
+    public void deleteComment(@AuthenticationPrincipal UserPrincipal principal,
+                              @PathVariable Long id,
+                              @PathVariable Long commentId) {
+        Content content = contents.findById(id).orElseThrow();
+        assertCanEdit(principal.account(), content);
+        comments.deleteById(commentId);
     }
 
     private void assertCanEdit(UserAccount actor, Content content) {
