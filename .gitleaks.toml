@@ -1,0 +1,10 @@
+title = "gitleaks config for defend/sabo"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow obvious sample/dev credentials in fixtures"
+paths = [
+  '''cicd_practice/backend/src/main/resources/application.yml''',
+]

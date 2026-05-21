@@ -1,0 +1,202 @@
+name: Security Audit (defend/sabo)
+
+on:
+  pull_request:
+    branches:
+      - 'defend/sabo'
+  push:
+    branches:
+      - 'defend/sabo'
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+concurrency:
+  group: security-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-test-and-deps:
+    name: Backend test & OWASP Dependency-Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cicd_practice/backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Maven test
+        run: mvn -B test
+
+      - name: OWASP Dependency-Check (Maven plugin)
+        run: mvn -B org.owasp:dependency-check-maven:check -DfailBuildOnCVSS=7
+        continue-on-error: false
+
+      - name: Upload backend dependency-check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-dependency-check-report
+          path: cicd_practice/backend/target/dependency-check-report.*
+          if-no-files-found: ignore
+
+  frontend-build-and-audit:
+    name: Frontend build & npm audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cicd_practice/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build
+        run: npm run build
+
+      - name: npm audit (fail on high)
+        run: npm audit --audit-level=high
+
+      - name: npm audit JSON report
+        if: always()
+        run: npm audit --json > npm-audit.json || true
+
+      - name: Upload npm audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-npm-audit
+          path: cicd_practice/frontend/npm-audit.json
+          if-no-files-found: ignore
+
+  semgrep:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Semgrep scan (OWASP Top 10 + security-audit)
+        run: |
+          semgrep scan \
+            --config p/owasp-top-ten \
+            --config p/security-audit \
+            --config p/java \
+            --config p/javascript \
+            --config p/typescript \
+            --config p/react \
+            --config p/secrets \
+            --severity ERROR \
+            --severity WARNING \
+            --error \
+            --sarif --output semgrep.sarif \
+            --json --output semgrep.json \
+            cicd_practice
+        continue-on-error: false
+
+      - name: Upload Semgrep SARIF
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-report
+          path: |
+            semgrep.sarif
+            semgrep.json
+          if-no-files-found: ignore
+
+  trivy-fs:
+    name: Trivy filesystem scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: cicd_practice
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+          format: table
+
+      - name: Trivy SARIF report
+        if: always()
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: cicd_practice
+          severity: CRITICAL,HIGH,MEDIUM
+          format: sarif
+          output: trivy-fs.sarif
+          exit-code: '0'
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-report
+          path: trivy-fs.sarif
+          if-no-files-found: ignore
+
+  gitleaks:
+    name: Gitleaks secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          config-path: ''
+
+  pr-comment-summary:
+    name: PR security summary comment
+    needs: [backend-test-and-deps, frontend-build-and-audit, semgrep, trivy-fs, gitleaks]
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compose summary
+        id: compose
+        run: |
+          {
+            echo "summary<<EOF"
+            echo "## Security Audit Summary"
+            echo ""
+            echo "| Job | Result |"
+            echo "| --- | --- |"
+            echo "| Backend test + OWASP Dependency-Check | ${{ needs.backend-test-and-deps.result }} |"
+            echo "| Frontend build + npm audit | ${{ needs.frontend-build-and-audit.result }} |"
+            echo "| Semgrep SAST | ${{ needs.semgrep.result }} |"
+            echo "| Trivy filesystem | ${{ needs.trivy-fs.result }} |"
+            echo "| Gitleaks | ${{ needs.gitleaks.result }} |"
+            echo ""
+            echo "Artifacts (dependency-check, npm-audit, semgrep, trivy) are available in the workflow run."
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post comment to PR
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: security-audit
+          message: ${{ steps.compose.outputs.summary }}
