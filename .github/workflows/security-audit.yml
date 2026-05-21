@@ -1,0 +1,590 @@
+name: Security Audit (defend/Brit)
+
+# 정책 근거: cicd_practice/SECURITY_POLICY.md
+# 도구 선정 근거: cicd_practice/SECURITY_TOOLS.md
+on:
+  pull_request:
+    branches:
+      - defend/Brit
+  workflow_dispatch:
+
+# 최소 권한 원칙 — 공급망 공격 대비
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  security-events: write  # SARIF 업로드
+
+concurrency:
+  group: security-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: cicd_practice
+
+jobs:
+  # ────────────────────────────────────────────────
+  # 변경된 파일 분석 (성능 최적화 — 미래 확장용)
+  # ────────────────────────────────────────────────
+  analyze:
+    name: Analyze changes
+    runs-on: ubuntu-latest
+    outputs:
+      backend-changed: ${{ steps.changes.outputs.backend }}
+      frontend-changed: ${{ steps.changes.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect changed paths
+        id: changes
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          # 매니페스트나 워크플로 변경 시는 전체 스캔. PR 외 이벤트면 전체 스캔
+          if [ -z "$base" ] || [ -z "$head" ]; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          diff=$(git diff --name-only "$base" "$head" || true)
+          echo "::group::Changed files"
+          echo "$diff"
+          echo "::endgroup::"
+          # 항상 전체 스캔 — PR 게이트는 모든 영역 검증해야 안전
+          echo "backend=true" >> "$GITHUB_OUTPUT"
+          echo "frontend=true" >> "$GITHUB_OUTPUT"
+
+  # ────────────────────────────────────────────────
+  # 1) Snyk — Maven 의존성 (W11 / A06)
+  # ────────────────────────────────────────────────
+  snyk-backend:
+    name: Snyk — Backend (Maven)
+    needs: analyze
+    if: needs.analyze.outputs.backend-changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+      - name: Skip if SNYK_TOKEN missing
+        id: token
+        run: |
+          if [ -z "${{ secrets.SNYK_TOKEN }}" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::SNYK_TOKEN secret 미설정. Snyk 백엔드 스캔 건너뜀. SECURITY_POLICY.md 참고."
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install Snyk CLI
+        if: steps.token.outputs.available == 'true'
+        run: npm install -g snyk
+        working-directory: .
+      - name: Snyk test (Maven)
+        if: steps.token.outputs.available == 'true'
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        working-directory: cicd_practice/backend
+        run: |
+          snyk auth "$SNYK_TOKEN"
+          snyk test --severity-threshold=high --sarif-file-output=../../snyk-backend.sarif --json-file-output=../../snyk-backend.json || echo "snyk_exit=$?" >> "$GITHUB_ENV"
+      - name: Upload SARIF to GitHub Security
+        if: always() && steps.token.outputs.available == 'true' && hashFiles('snyk-backend.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-backend.sarif
+          category: snyk-backend
+      - name: Upload reports as artifact
+        if: always() && steps.token.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-backend
+          path: |
+            cicd_practice/snyk-backend.sarif
+            cicd_practice/snyk-backend.json
+          if-no-files-found: ignore
+      - name: Fail on high+ (policy)
+        if: steps.token.outputs.available == 'true'
+        run: |
+          if [ -n "${snyk_exit:-}" ] && [ "${snyk_exit}" != "0" ]; then
+            echo "::error::Snyk found high+ severity vulnerabilities in backend (exit=$snyk_exit)"
+            exit 1
+          fi
+
+  # ────────────────────────────────────────────────
+  # 2) Snyk — npm 의존성 (W11 / A06)
+  # ────────────────────────────────────────────────
+  snyk-frontend:
+    name: Snyk — Frontend (npm)
+    needs: analyze
+    if: needs.analyze.outputs.frontend-changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: cicd_practice/frontend/package-lock.json
+      - name: npm ci
+        working-directory: cicd_practice/frontend
+        run: npm ci --no-audit --no-fund
+      - name: npm audit (보조)
+        working-directory: cicd_practice/frontend
+        run: npm audit --audit-level=high --json > ../../npm-audit.json || true
+        continue-on-error: true
+      - name: Skip if SNYK_TOKEN missing
+        id: token
+        run: |
+          if [ -z "${{ secrets.SNYK_TOKEN }}" ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::SNYK_TOKEN secret 미설정. Snyk 프런트엔드 스캔 건너뜀."
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install Snyk CLI
+        if: steps.token.outputs.available == 'true'
+        run: npm install -g snyk
+        working-directory: .
+      - name: Snyk test (npm)
+        if: steps.token.outputs.available == 'true'
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        working-directory: cicd_practice/frontend
+        run: |
+          snyk auth "$SNYK_TOKEN"
+          snyk test --severity-threshold=high --sarif-file-output=../../snyk-frontend.sarif --json-file-output=../../snyk-frontend.json || echo "snyk_exit=$?" >> "$GITHUB_ENV"
+      - name: Upload SARIF
+        if: always() && steps.token.outputs.available == 'true' && hashFiles('snyk-frontend.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-frontend.sarif
+          category: snyk-frontend
+      - name: Upload reports as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-frontend
+          path: |
+            cicd_practice/snyk-frontend.sarif
+            cicd_practice/snyk-frontend.json
+            cicd_practice/npm-audit.json
+          if-no-files-found: ignore
+      - name: Fail on high+ (policy)
+        if: steps.token.outputs.available == 'true'
+        run: |
+          if [ -n "${snyk_exit:-}" ] && [ "${snyk_exit}" != "0" ]; then
+            echo "::error::Snyk found high+ severity vulnerabilities in frontend (exit=$snyk_exit)"
+            exit 1
+          fi
+
+  # ────────────────────────────────────────────────
+  # 3) OWASP Dependency-Check — Java 보조 SCA (W11 / A06)
+  # ────────────────────────────────────────────────
+  owasp-dc:
+    name: OWASP Dependency-Check
+    needs: analyze
+    if: needs.analyze.outputs.backend-changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+      # NVD API key 있으면 더 빠름 — 없어도 동작
+      - name: Run dependency-check (failBuildOnCVSS=7.0)
+        working-directory: cicd_practice/backend
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          mvn -B -ntp dependency-check:check \
+            -DfailBuildOnCVSS=7.0 \
+            -DskipTests \
+            ${NVD_API_KEY:+-Dnvd.api.key=$NVD_API_KEY} \
+            -Dformats=HTML,JSON,SARIF || echo "owasp_exit=$?" >> "$GITHUB_ENV"
+      - name: Upload SARIF
+        if: always() && hashFiles('cicd_practice/backend/target/dependency-check-report.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: cicd_practice/backend/target/dependency-check-report.sarif
+          category: owasp-dc
+      - name: Upload reports as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-dependency-check
+          path: |
+            cicd_practice/backend/target/dependency-check-report.*
+          if-no-files-found: ignore
+      - name: Enforce policy
+        run: |
+          if [ -n "${owasp_exit:-}" ] && [ "${owasp_exit}" != "0" ]; then
+            echo "::error::OWASP Dependency-Check found CVSS>=7.0 vulnerabilities"
+            exit 1
+          fi
+
+  # ────────────────────────────────────────────────
+  # 4) Semgrep — SAST (W2/W3/W4/W6/W10 등 / A03/A05/A02)
+  # ────────────────────────────────────────────────
+  semgrep:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep scan
+        working-directory: .
+        run: |
+          semgrep ci \
+            --config p/owasp-top-ten \
+            --config p/java \
+            --config p/javascript \
+            --config p/react \
+            --config p/secrets \
+            --config p/security-audit \
+            --sarif --output=semgrep.sarif \
+            --error || echo "semgrep_exit=$?" >> "$GITHUB_ENV"
+      - name: Upload SARIF
+        if: always() && hashFiles('semgrep.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep
+          path: semgrep.sarif
+          if-no-files-found: ignore
+      - name: Enforce policy (ERROR -> fail)
+        run: |
+          if [ -n "${semgrep_exit:-}" ] && [ "${semgrep_exit}" != "0" ]; then
+            echo "::error::Semgrep found ERROR-level findings"
+            exit 1
+          fi
+
+  # ────────────────────────────────────────────────
+  # 5) Gitleaks — 시크릿 스캔 (W8.1)
+  # ────────────────────────────────────────────────
+  gitleaks:
+    name: Gitleaks (secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run gitleaks
+        working-directory: .
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest \
+            detect --source /repo --report-path /repo/gitleaks.json \
+            --report-format json --redact --no-banner || echo "leak_exit=$?" >> "$GITHUB_ENV"
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks
+          path: gitleaks.json
+          if-no-files-found: ignore
+      - name: Enforce policy (any secret -> fail)
+        run: |
+          if [ -n "${leak_exit:-}" ] && [ "${leak_exit}" != "0" ]; then
+            echo "::error::Gitleaks found secrets in the diff. See artifact 'gitleaks'."
+            exit 1
+          fi
+
+  # ────────────────────────────────────────────────
+  # 6) Trivy fs — SCA/시크릿/IaC 보조 (W11 / W8.1 / IaC placeholder)
+  # ────────────────────────────────────────────────
+  trivy-fs:
+    name: Trivy filesystem
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy fs scan
+        working-directory: .
+        run: |
+          docker run --rm -v "$PWD:/repo" aquasec/trivy:latest \
+            fs --scanners vuln,secret,misconfig \
+            --severity CRITICAL,HIGH \
+            --format sarif --output /repo/trivy.sarif \
+            --exit-code 1 /repo || echo "trivy_exit=$?" >> "$GITHUB_ENV"
+      - name: Upload SARIF
+        if: always() && hashFiles('trivy.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy.sarif
+          category: trivy-fs
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs
+          path: trivy.sarif
+          if-no-files-found: ignore
+      - name: Enforce policy
+        run: |
+          if [ -n "${trivy_exit:-}" ] && [ "${trivy_exit}" != "0" ]; then
+            echo "::error::Trivy found CRITICAL/HIGH issues"
+            exit 1
+          fi
+
+  # ────────────────────────────────────────────────
+  # 7) 보고서 집계 + PR 코멘트 + Critical 이슈 자동 생성
+  # ────────────────────────────────────────────────
+  aggregate-report:
+    name: Aggregate & report
+    needs: [snyk-backend, snyk-frontend, owasp-dc, semgrep, gitleaks, trivy-fs]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Generate Markdown report
+        working-directory: .
+        run: |
+          set -euo pipefail
+          out=security-report.md
+          pr_num="${{ github.event.pull_request.number }}"
+          {
+            echo "# 🔒 Security Audit Report"
+            echo
+            echo "- 대상 브랜치: \`${{ github.event.pull_request.base.ref }}\`"
+            echo "- 공격 브랜치: \`${{ github.event.pull_request.head.ref }}\`"
+            echo "- 커밋: \`${{ github.event.pull_request.head.sha }}\`"
+            echo "- 정책 근거: [SECURITY_POLICY.md](./cicd_practice/SECURITY_POLICY.md)"
+            echo "- 도구 매핑: [SECURITY_TOOLS.md](./cicd_practice/SECURITY_TOOLS.md)"
+            echo
+            echo "## Job 결과 요약"
+            echo
+            echo "| Job | 결과 |"
+            echo "| --- | --- |"
+            echo "| Snyk Backend | ${{ needs.snyk-backend.result }} |"
+            echo "| Snyk Frontend | ${{ needs.snyk-frontend.result }} |"
+            echo "| OWASP DC | ${{ needs.owasp-dc.result }} |"
+            echo "| Semgrep | ${{ needs.semgrep.result }} |"
+            echo "| Gitleaks | ${{ needs.gitleaks.result }} |"
+            echo "| Trivy fs | ${{ needs.trivy-fs.result }} |"
+            echo
+          } > "$out"
+
+          # 도구별 상세 (있는 만큼만)
+          python3 - <<'PY' >> "$out"
+          import json, os, glob, pathlib
+          def load(p):
+              try:
+                  with open(p) as f: return json.load(f)
+              except Exception: return None
+
+          def section(title): print(f"\n## {title}\n")
+
+          # Snyk
+          for name, path in [("Snyk Backend","artifacts/snyk-backend/snyk-backend.json"),
+                             ("Snyk Frontend","artifacts/snyk-frontend/snyk-frontend.json")]:
+              if not os.path.exists(path): continue
+              data = load(path)
+              if not data: continue
+              vulns = data.get("vulnerabilities") if isinstance(data, dict) else None
+              if not vulns: continue
+              section(f"{name} — Snyk")
+              print("| 심각도 | CVE / ID | 패키지 | 제목 | 권장 |")
+              print("| --- | --- | --- | --- | --- |")
+              for v in sorted(vulns, key=lambda x: {"critical":0,"high":1,"medium":2,"low":3}.get(x.get("severity","low"),9)):
+                  sev = v.get("severity","?")
+                  vid = (v.get("identifiers",{}).get("CVE") or [v.get("id","")])
+                  vid = vid[0] if isinstance(vid,list) and vid else (vid if isinstance(vid,str) else v.get("id",""))
+                  pkg = f"{v.get('packageName','?')}@{v.get('version','?')}"
+                  title = (v.get("title","") or "").replace("|","\\|")[:80]
+                  fix = (v.get("fixedIn",["—"])[:1] or ["—"])[0]
+                  print(f"| {sev} | {vid} | {pkg} | {title} | {fix} |")
+
+          # Semgrep
+          sg = "artifacts/semgrep/semgrep.sarif"
+          if os.path.exists(sg):
+              d = load(sg)
+              runs = (d or {}).get("runs",[])
+              if runs:
+                  results = runs[0].get("results",[])
+                  if results:
+                      section("Semgrep SAST")
+                      print("| 심각도 | 규칙 | 파일:라인 | 메시지 |")
+                      print("| --- | --- | --- | --- |")
+                      for r in results[:50]:
+                          lvl = r.get("level","note")
+                          rid = r.get("ruleId","")
+                          loc = r.get("locations",[{}])[0].get("physicalLocation",{})
+                          uri = loc.get("artifactLocation",{}).get("uri","")
+                          line = loc.get("region",{}).get("startLine","")
+                          msg = (r.get("message",{}).get("text","") or "").replace("|","\\|")[:100]
+                          print(f"| {lvl} | `{rid}` | `{uri}:{line}` | {msg} |")
+                      if len(results) > 50:
+                          print(f"\n*... +{len(results)-50}건 생략, 전체는 artifact 참고*")
+
+          # Gitleaks
+          gl = "artifacts/gitleaks/gitleaks.json"
+          if os.path.exists(gl):
+              d = load(gl)
+              if isinstance(d, list) and d:
+                  section("Gitleaks — Secrets")
+                  print("| 룰 | 파일:라인 | 커밋 |")
+                  print("| --- | --- | --- |")
+                  for r in d[:30]:
+                      print(f"| `{r.get('RuleID','')}` | `{r.get('File','')}:{r.get('StartLine','')}` | `{r.get('Commit','')[:10]}` |")
+
+          # Trivy
+          tv = "artifacts/trivy-fs/trivy.sarif"
+          if os.path.exists(tv):
+              d = load(tv)
+              runs = (d or {}).get("runs",[])
+              if runs:
+                  results = runs[0].get("results",[])
+                  if results:
+                      section("Trivy filesystem")
+                      print(f"- 발견 {len(results)}건 (상세는 artifact 참고)")
+          PY
+
+          {
+            echo
+            echo "---"
+            echo "_자동 생성 보고서. 자세한 정책은 \`SECURITY_POLICY.md\` 참고._"
+          } >> "$out"
+
+          cp "$out" security-report.md
+          echo "REPORT_PATH=$PWD/security-report.md" >> "$GITHUB_ENV"
+      - name: Upload combined report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: security-report.md
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('security-report.md', 'utf8');
+            const marker = '<!-- security-audit-report -->';
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request.number;
+            const comments = await github.rest.issues.listComments({ owner, repo, issue_number: pr });
+            const existing = comments.data.find(c => c.body && c.body.includes(marker));
+            const finalBody = `${marker}\n${body}`;
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body: finalBody });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: pr, body: finalBody });
+            }
+      - name: Detect critical & open issue
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            function readJSON(p) { try { return JSON.parse(fs.readFileSync(p,'utf8')); } catch { return null; } }
+            let critical = [];
+
+            // Snyk JSON 두 개
+            for (const f of ['artifacts/snyk-backend/snyk-backend.json','artifacts/snyk-frontend/snyk-frontend.json']) {
+              const d = readJSON(f);
+              const vulns = (d && d.vulnerabilities) || [];
+              for (const v of vulns) {
+                if ((v.severity||'').toLowerCase() === 'critical') {
+                  critical.push({ source: path.basename(f,'.json'), id: v.id, title: v.title, pkg: `${v.packageName}@${v.version}` });
+                }
+              }
+            }
+            // Semgrep SARIF — level=error 중 cvss/severity critical 표기된 경우
+            const sg = readJSON('artifacts/semgrep/semgrep.sarif');
+            if (sg && sg.runs) {
+              for (const run of sg.runs) {
+                for (const r of (run.results||[])) {
+                  const props = r.properties || {};
+                  const sev = (props.severity || '').toLowerCase();
+                  if (sev === 'critical') {
+                    critical.push({ source:'semgrep', id: r.ruleId, title: (r.message||{}).text, pkg:'-' });
+                  }
+                }
+              }
+            }
+            // Gitleaks → 시크릿은 항상 critical 취급
+            const gl = readJSON('artifacts/gitleaks/gitleaks.json');
+            if (Array.isArray(gl) && gl.length) {
+              for (const r of gl) {
+                critical.push({ source:'gitleaks', id: r.RuleID, title:`Secret leak in ${r.File}:${r.StartLine}`, pkg:'-' });
+              }
+            }
+
+            if (!critical.length) {
+              core.info('No critical findings.');
+              return;
+            }
+
+            const pr = context.payload.pull_request;
+            const lines = critical.map(c => `- [${c.source}] \`${c.id}\` — ${c.title} (${c.pkg})`);
+            const body = [
+              `## 🚨 Critical 보안 취약점 발견`,
+              ``,
+              `- PR: #${pr.number} ${pr.html_url}`,
+              `- 브랜치: \`${pr.head.ref}\` → \`${pr.base.ref}\``,
+              `- 커밋: \`${pr.head.sha}\``,
+              ``,
+              `### 발견 항목`,
+              ...lines,
+              ``,
+              `정책: \`cicd_practice/SECURITY_POLICY.md\` — Critical 발견 시 24시간 내 패치 또는 명시 예외 처리 필요.`,
+            ].join('\n');
+
+            const { owner, repo } = context.repo;
+            await github.rest.issues.create({
+              owner, repo,
+              title: `[Security][Critical] PR #${pr.number} — ${critical.length} finding(s)`,
+              body,
+              labels: ['security','critical','automated']
+            });
+
+  # ────────────────────────────────────────────────
+  # 8) 빌드/테스트 — 보안 게이트 통과 후 실행
+  # ────────────────────────────────────────────────
+  build-backend:
+    name: Build & test backend
+    needs: [snyk-backend, owasp-dc, semgrep, gitleaks, trivy-fs]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+      - name: mvn verify
+        working-directory: cicd_practice/backend
+        run: mvn -B -ntp verify -Ddependency-check.skip=true
+
+  build-frontend:
+    name: Build frontend
+    needs: [snyk-frontend, semgrep, gitleaks, trivy-fs]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: cicd_practice/frontend/package-lock.json
+      - name: npm ci & build
+        working-directory: cicd_practice/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build

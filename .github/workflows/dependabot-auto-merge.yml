@@ -1,0 +1,38 @@
+name: Dependabot auto-merge (patch only)
+
+# 정책: 보안 감사 통과한 Dependabot PR 중 patch 업데이트만 자동 머지.
+# 정책 근거: cicd_practice/SECURITY_POLICY.md §1 / SECURITY_TOOLS.md §4
+on:
+  pull_request:
+    branches:
+      - defend/Brit
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable auto-merge for patch updates
+        if: steps.meta.outputs.update-type == 'version-update:semver-patch'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Comment when not auto-merged
+        if: steps.meta.outputs.update-type != 'version-update:semver-patch'
+        run: |
+          gh pr comment "$PR_URL" --body "이 PR은 \`${{ steps.meta.outputs.update-type }}\`로 patch가 아니어서 자동 머지되지 않습니다. 수동 검토 필요. (정책: SECURITY_POLICY.md §1)"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

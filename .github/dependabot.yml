@@ -1,0 +1,56 @@
+version: 2
+updates:
+  # Backend — Maven
+  - package-ecosystem: maven
+    directory: /cicd_practice/backend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 5
+    target-branch: defend/Brit
+    labels:
+      - dependencies
+      - backend
+      - automated
+    commit-message:
+      prefix: "deps(backend)"
+      include: scope
+
+  # Frontend — npm
+  - package-ecosystem: npm
+    directory: /cicd_practice/frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 5
+    target-branch: defend/Brit
+    labels:
+      - dependencies
+      - frontend
+      - automated
+    commit-message:
+      prefix: "deps(frontend)"
+      include: scope
+    versioning-strategy: increase
+
+  # GitHub Actions 자체 — 공급망 공격(third-party action) 방지
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 5
+    target-branch: defend/Brit
+    labels:
+      - dependencies
+      - ci
+      - automated
+    commit-message:
+      prefix: "deps(actions)"
+      include: scope
