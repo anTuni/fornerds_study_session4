@@ -6,14 +6,42 @@
 
 ## 권장 진행
 
-1. 수비자는 `defend/{name}` 브랜치에서 workflow를 개선합니다.
+1. 수비자는 `defend/{name}` 브랜치에서 `.github/workflows/security-audit.yml`를 새로 추가합니다.
 2. 공격자는 상대의 방어 브랜치에서 `attack/{name}` 브랜치를 만듭니다.
 3. 공격자는 OWASP Top 10 취약점 하나를 의도적으로 추가합니다.
-4. 공격자는 `attack/{name}`에서 `defend/{peer}`로 PR을 생성합니다.
+4. 공격자는 `attack/{name}`에서 상대의 `defend/{peer}`로 PR을 생성합니다.
 5. 수비자는 Actions 결과와 아티팩트를 보고 취약점 탐지 여부를 확인합니다.
+
+## 브랜치 예시
+
+| 사람 | 먼저 만드는 브랜치 | 상대 브랜치에서 만드는 공격 브랜치 | PR 대상 |
+| --- | --- | --- | --- |
+| Alice | `defend/alice` | `attack/alice` | `defend/bob` |
+| Bob | `defend/bob` | `attack/bob` | `defend/alice` |
+
+수비자의 workflow는 자신의 `defend/{name}` 브랜치를 대상으로 들어오는 PR에서 동작해야 합니다.
+
+```yaml
+on:
+  pull_request:
+    branches:
+      - defend/alice
+```
+
+공통 workflow를 만들고 싶다면 모든 방어 브랜치 대상 PR에서 실행되도록 구성할 수 있습니다.
+
+```yaml
+on:
+  pull_request:
+    branches:
+      - 'defend/**'
+```
 
 ## 방어자가 추가해볼 만한 job
 
+- Maven 테스트
+- npm build
+- OWASP Dependency-Check
 - Snyk 의존성 스캔
 - CodeQL 분석
 - Gitleaks secret scan

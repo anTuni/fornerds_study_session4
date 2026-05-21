@@ -6,7 +6,7 @@
 
 - Backend: Java 17, Spring Boot 3, Spring Security, Spring Data JPA, H2
 - Frontend: React, TypeScript, Vite
-- CI/CD Practice: GitHub Actions, OWASP Dependency-Check, npm audit, Semgrep, Trivy, Dependabot
+- CI/CD Practice: GitHub Actions, OWASP Dependency-Check, npm audit, Semgrep, Trivy 등
 
 국내 웹서비스 실습에서 가장 많이 접하는 Java/Spring 기반 백엔드와 React 프론트엔드 조합을 선택했습니다.
 
@@ -20,8 +20,6 @@ cicd_practice
 ├── frontend
 │   ├── package.json
 │   └── src
-├── .github
-│   └── workflows
 └── docs
 ```
 
@@ -58,9 +56,17 @@ npm run dev
 
 1. 각자 `defend/{name}` 브랜치를 만듭니다.
 2. 상대의 `defend/{peer}` 브랜치에서 `attack/{name}` 브랜치를 만듭니다.
-3. 수비자는 `defend/{name}` 브랜치에서 `.github/workflows/security-audit.yml`를 추가하거나 개선합니다.
-4. 공격자는 `attack/{name}` 브랜치에 OWASP Top 10 유형의 취약점을 하나 이상 심고 PR을 만듭니다.
-5. 보안 감사 job이 취약점을 탐지하는지 확인하고, 보고서 아티팩트를 검토합니다.
+3. 수비자는 `defend/{name}` 브랜치에서 `.github/workflows/security-audit.yml`를 처음부터 추가합니다.
+4. 수비자가 만든 workflow는 `defend/{name}`을 대상으로 들어오는 PR에서 동작하도록 구성합니다.
+5. 공격자는 `attack/{name}` 브랜치에 OWASP Top 10 유형의 취약점을 하나 이상 심고, 상대의 `defend/{peer}` 브랜치로 PR을 만듭니다.
+6. 보안 감사 job이 취약점을 탐지하는지 확인하고, 보고서 아티팩트를 검토합니다.
+
+예를 들어 `alice`와 `bob`이 2인 1조라면 다음처럼 진행합니다.
+
+| 사람 | 수비 브랜치 | 공격 브랜치 | 공격 PR 대상 |
+| --- | --- | --- | --- |
+| Alice | `defend/alice` | `attack/alice` | `defend/bob` |
+| Bob | `defend/bob` | `attack/bob` | `defend/alice` |
 
 ## 공격 실습 아이디어
 
@@ -76,15 +82,37 @@ npm run dev
 - A09 Security Logging and Monitoring Failures: 인증/권한 실패 로그 제거
 - A10 SSRF: 관리자 URL 미리보기 기능에 내부망 호출 허용
 
-## 보안 감사 workflow
+## 수비자가 만들 workflow 요구사항
 
-`.github/workflows/security-audit.yml`는 방어 실습의 출발점입니다.
+이 저장소에는 기본 `.github` 설정이 없습니다. 수비자는 자신의 `defend/{name}` 브랜치에서 `.github/workflows/security-audit.yml` 파일을 새로 만들어야 합니다.
 
-- PR 및 `defend/**` 브랜치 push에서 실행
-- Maven 테스트와 의존성 스캔
-- npm audit
-- Semgrep SAST
+workflow는 상대 공격자가 `attack/{peer}`에서 내 `defend/{name}` 브랜치로 PR을 만들 때 실행되어야 합니다. 예시는 아래처럼 시작할 수 있습니다.
+
+```yaml
+name: Security Audit
+
+on:
+  pull_request:
+    branches:
+      - defend/alice
+```
+
+팀원이 많거나 브랜치명을 일반화하고 싶다면 아래처럼 모든 `defend/**` 대상 PR에서 실행되도록 해도 됩니다.
+
+```yaml
+on:
+  pull_request:
+    branches:
+      - 'defend/**'
+```
+
+권장 job:
+
+- Maven 테스트와 Java 의존성 스캔
+- npm build와 `npm audit`
+- Semgrep 또는 CodeQL 기반 SAST
 - Trivy 파일시스템 스캔
 - 결과를 `security-report` 아티팩트로 업로드
+- 치명적 취약점은 실패 처리하고, 중간 심각도는 보고서로 관리
 
-Snyk를 쓰려면 저장소 Secrets에 `SNYK_TOKEN`을 추가한 뒤 workflow의 Snyk step 주석을 해제하세요.
+Snyk를 쓰려면 저장소 Secrets에 `SNYK_TOKEN`을 추가한 뒤 Snyk CLI 또는 Snyk GitHub Action을 workflow에 직접 추가하세요.
