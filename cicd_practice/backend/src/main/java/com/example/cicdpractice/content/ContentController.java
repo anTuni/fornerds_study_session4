@@ -68,7 +68,6 @@ public class ContentController {
     @PreAuthorize("hasAnyRole('ADMIN', 'EDITOR')")
     public ContentResponse update(@AuthenticationPrincipal UserPrincipal principal, @PathVariable Long id, @Valid @RequestBody ContentRequest request) {
         Content content = contents.findById(id).orElseThrow();
-        assertCanEdit(principal.account(), content);
         content.update(request.title(), request.body(), request.status());
         return ContentResponse.from(contents.save(content));
     }
