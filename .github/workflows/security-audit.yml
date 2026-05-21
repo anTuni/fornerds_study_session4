@@ -1,0 +1,62 @@
+# defend/** 브랜치로 들어오는 PR에서 OWASP Top 10 위주 자동 보안 감사를 수행하는 워크플로우
+name: Security Audit
+
+on:
+  pull_request:
+    branches:
+      - 'defend/**'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: OWASP Dependency-Check (Java)
+        working-directory: cicd_practice/backend
+        run: mvn -B -ntp org.owasp:dependency-check-maven:10.0.4:check -DfailBuildOnCVSS=7
+
+      - name: npm audit (high+)
+        working-directory: cicd_practice/frontend
+        run: |
+          [ -f package-lock.json ] || npm install --package-lock-only --ignore-scripts
+          npm audit --audit-level=high
+
+      - name: Semgrep SAST (OWASP / Java / React / secrets)
+        run: |
+          python3 -m pip install --quiet semgrep
+          semgrep scan \
+            --config p/owasp-top-ten \
+            --config p/java \
+            --config p/react \
+            --config p/secrets \
+            --error \
+            cicd_practice/
+
+      - name: Gitleaks (secret scan)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload security report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: |
+            cicd_practice/backend/target/dependency-check-report.*
+            results.sarif
+          if-no-files-found: ignore
