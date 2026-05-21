@@ -37,6 +37,10 @@ public class AuthService {
         return users.findById(session.userId()).filter(UserAccount::isActive);
     }
 
+    public void invalidateToken(String token) {
+        sessions.remove(token);
+    }
+
     private record SessionToken(Long userId, Instant expiresAt) {
     }
 }
