@@ -1,0 +1,127 @@
+name: Security Audit
+
+on:
+  pull_request:
+    branches:
+      - defend/tuni1
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  security-audit:
+    name: Security audit gate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cicd_practice
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: cicd_practice/frontend/package-lock.json
+
+      - name: Run backend tests
+        working-directory: cicd_practice/backend
+        run: mvn -B test
+
+      - name: Install frontend dependencies
+        working-directory: cicd_practice/frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: cicd_practice/frontend
+        run: npm run build
+
+      - name: Check npm high vulnerabilities
+        working-directory: cicd_practice/frontend
+        run: npm audit --audit-level=high
+
+      - name: Run educational OWASP checks
+        id: owasp
+        shell: bash
+        run: |
+          set +e
+          mkdir -p security-reports
+          report="security-reports/security-report.md"
+          findings="security-reports/findings.txt"
+          : > "$findings"
+
+          echo "# Security Audit Report" > "$report"
+          echo "" >> "$report"
+          echo "- Target branch: ${{ github.base_ref }}" >> "$report"
+          echo "- Source branch: ${{ github.head_ref }}" >> "$report"
+          echo "- Commit: ${{ github.sha }}" >> "$report"
+          echo "" >> "$report"
+
+          if grep -RIn --include='*.tsx' --include='*.ts' "dangerouslySetInnerHTML" frontend/src >> "$findings"; then
+            true
+          fi
+
+          if grep -RIn --include='*.java' "createNativeQuery\\|Statement .*execute\\|Runtime.getRuntime().exec" backend/src/main/java >> "$findings"; then
+            true
+          fi
+
+          if grep -RIn --include='*.java' "permitAll()" backend/src/main/java | grep -v "api/auth/login\\|h2-console" >> "$findings"; then
+            true
+          fi
+
+          if [ -s "$findings" ]; then
+            echo "blocked=true" >> "$GITHUB_OUTPUT"
+            echo "## Findings" >> "$report"
+            echo "" >> "$report"
+            echo "The PR contains patterns commonly related to OWASP Top 10 risks." >> "$report"
+            echo "" >> "$report"
+            echo '```text' >> "$report"
+            cat "$findings" >> "$report"
+            echo '```' >> "$report"
+            echo "" >> "$report"
+            echo "## Required Action" >> "$report"
+            echo "" >> "$report"
+            echo "- Remove the risky pattern or replace it with a safe implementation." >> "$report"
+            echo "- Ask the defender to review the report before merging." >> "$report"
+          else
+            echo "blocked=false" >> "$GITHUB_OUTPUT"
+            echo "No educational OWASP check findings were detected." >> "$report"
+          fi
+
+      - name: Upload security report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: cicd_practice/security-reports/security-report.md
+
+      - name: Comment security report on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('cicd_practice/security-reports/security-report.md', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: report.length > 60000 ? report.slice(0, 60000) : report,
+            });
+
+      - name: Block PR when findings exist
+        if: steps.owasp.outputs.blocked == 'true'
+        run: |
+          echo "Security findings detected. Failing this job to block unsafe PRs when branch protection requires this check."
+          exit 1
