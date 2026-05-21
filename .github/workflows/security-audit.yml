@@ -1,0 +1,194 @@
+name: Security Audit (defend/YUN)
+
+on:
+  pull_request:
+    branches:
+      - defend/YUN
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+  actions: read
+
+jobs:
+  # ── 1. 시크릿/자격증명 노출 탐지 ─────────────────────────────────
+  secret-scan:
+    name: "🔑 Secret Scanning (Gitleaks)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── 2. scan.py 커스텀 보안 스캔 ──────────────────────────────────
+  custom-scan:
+    name: "🔍 Custom Security Scan (scan.py)"
+    runs-on: ubuntu-latest
+    outputs:
+      has_critical: ${{ steps.evaluate.outputs.has_critical }}
+      has_high: ${{ steps.evaluate.outputs.has_high }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+
+      - name: Run scan.py
+        run: python scan.py --root cicd_practice/ --out scan-results.json
+
+      - name: Evaluate severity
+        id: evaluate
+        run: |
+          python3 -c "
+          import json, os
+          with open('scan-results.json') as f:
+              data = json.load(f)
+          by_sev = data['summary'].get('by_severity', {})
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('has_critical=' + ('true' if by_sev.get('critical', 0) > 0 else 'false') + '\n')
+              out.write('has_high=' + ('true' if by_sev.get('high', 0) > 0 else 'false') + '\n')
+          "
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scan-results
+          path: scan-results.json
+
+  # ── 3. 의존성 취약점 스캔 ─────────────────────────────────────────
+  dependency-scan:
+    name: "📦 Dependency Vulnerability Scan"
+    runs-on: ubuntu-latest
+    outputs:
+      backend_failed: ${{ steps.backend.outputs.failed }}
+      frontend_failed: ${{ steps.frontend.outputs.failed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: temurin
+          cache: maven
+
+      - name: OWASP Dependency Check (Backend)
+        id: backend
+        working-directory: cicd_practice/backend
+        run: |
+          if mvn org.owasp:dependency-check-maven:check \
+               -DfailBuildOnCVSS=7 \
+               --no-transfer-progress; then
+            echo "failed=false" >> $GITHUB_OUTPUT
+          else
+            echo "failed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: cicd_practice/frontend/package-lock.json
+
+      - name: npm install
+        working-directory: cicd_practice/frontend
+        run: npm ci
+
+      - name: npm audit (Frontend)
+        id: frontend
+        working-directory: cicd_practice/frontend
+        run: |
+          if npm audit --audit-level=high; then
+            echo "failed=false" >> $GITHUB_OUTPUT
+          else
+            echo "failed=true" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-reports
+          path: cicd_practice/backend/target/dependency-check-report.*
+
+  # ── 4. PR 보안 감사 리포트 생성 및 코멘트 ────────────────────────
+  report:
+    name: "📋 Security Audit Report"
+    needs: [secret-scan, custom-scan, dependency-scan]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    outputs:
+      has_blockers: ${{ steps.generate.outputs.has_blockers }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: scan-results
+          path: .
+        continue-on-error: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate report and post PR comment
+        id: generate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SECRET_SCAN_RESULT: ${{ needs.secret-scan.result }}
+          HAS_CRITICAL: ${{ needs.custom-scan.outputs.has_critical }}
+          HAS_HIGH: ${{ needs.custom-scan.outputs.has_high }}
+          BACKEND_DEP_FAILED: ${{ needs.dependency-scan.outputs.backend_failed }}
+          FRONTEND_DEP_FAILED: ${{ needs.dependency-scan.outputs.frontend_failed }}
+        run: python .github/scripts/security_report.py
+
+  # ── 5. 관리자 승인 대기 (HIGH/CRITICAL 발견 시) ──────────────────
+  admin-gate:
+    name: "🔐 Admin Approval Required"
+    needs: report
+    if: needs.report.outputs.has_blockers == 'true'
+    runs-on: ubuntu-latest
+    environment: security-review   # GitHub Settings > Environments 에서 required reviewer 설정 필요
+    steps:
+      - name: Admin approval confirmed
+        run: echo "✅ 관리자 보안 검토 승인 완료"
+
+  # ── 6. 최종 보안 게이트 ───────────────────────────────────────────
+  security-gate:
+    name: "🚦 Security Gate"
+    needs: [report, admin-gate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate gate
+        env:
+          HAS_BLOCKERS: ${{ needs.report.outputs.has_blockers }}
+          ADMIN_GATE: ${{ needs.admin-gate.result }}
+        run: |
+          if [ "$HAS_BLOCKERS" = "true" ]; then
+            if [ "$ADMIN_GATE" = "success" ]; then
+              echo "✅ 관리자 승인 완료. 머지 가능합니다."
+            else
+              echo "❌ HIGH/CRITICAL 취약점 발견. 관리자 승인이 필요합니다."
+              echo "PR 코멘트의 보안 감사 리포트를 확인하고 취약점을 수정하세요."
+              exit 1
+            fi
+          else
+            echo "✅ 보안 감사 통과. 머지 가능합니다."
+          fi
