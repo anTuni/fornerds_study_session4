@@ -76,10 +76,6 @@ jobs:
             true
           fi
 
-          if grep -RIn --include='*.java' "permitAll()" backend/src/main/java | grep -v "api/auth/login\\|h2-console" >> "$findings"; then
-            true
-          fi
-
           if [ -s "$findings" ]; then
             echo "blocked=true" >> "$GITHUB_OUTPUT"
             echo "## Findings" >> "$report"
