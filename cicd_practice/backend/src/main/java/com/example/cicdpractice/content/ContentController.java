@@ -3,11 +3,17 @@ package com.example.cicdpractice.content;
 import com.example.cicdpractice.user.Role;
 import com.example.cicdpractice.user.UserAccount;
 import com.example.cicdpractice.user.UserPrincipal;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -29,6 +35,9 @@ public class ContentController {
     private final ContentRepository contents;
     private final CommentRepository comments;
 
+    @PersistenceContext
+    private EntityManager entityManager;
+
     public ContentController(ContentRepository contents, CommentRepository comments) {
         this.contents = contents;
         this.comments = comments;
@@ -42,13 +51,45 @@ public class ContentController {
         return result.stream().map(ContentResponse::from).toList();
     }
 
+    @GetMapping("/search")
+    @SuppressWarnings("unchecked")
+    public List<ContentResponse> advancedSearch(@RequestParam(defaultValue = "") String keyword,
+                                                @RequestParam(defaultValue = "updated_at") String orderBy) {
+        String sql = "SELECT * FROM content WHERE status = 'PUBLISHED'"
+                + " AND (LOWER(title) LIKE LOWER('%" + keyword + "%')"
+                + " OR LOWER(body) LIKE LOWER('%" + keyword + "%'))"
+                + " ORDER BY " + orderBy + " DESC";
+        List<Content> result = entityManager.createNativeQuery(sql, Content.class).getResultList();
+        return result.stream().map(ContentResponse::from).toList();
+    }
+
     @GetMapping("/{id}")
-    public ContentDetail detail(@PathVariable Long id) {
+    public ContentDetail detail(@PathVariable Long id, @RequestParam(defaultValue = "false") boolean preview) {
         Content content = contents.findById(id).orElseThrow();
-        if (content.getStatus() != ContentStatus.PUBLISHED) {
+        if (!preview && content.getStatus() != ContentStatus.PUBLISHED) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND);
         }
         return ContentDetail.from(content, comments.findByContentIdOrderByCreatedAtAsc(id));
+    }
+
+    @GetMapping("/{id}/health-check")
+    public HealthCheckResponse healthCheck(@PathVariable Long id, @RequestParam String host) {
+        contents.findById(id).orElseThrow();
+        List<String> output = new ArrayList<>();
+        try {
+            Process process = Runtime.getRuntime().exec(new String[]{"sh", "-c", "ping -c 1 " + host});
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.add(line);
+                }
+            }
+            process.waitFor();
+        } catch (Exception e) {
+            output.add("error: " + e.getMessage());
+        }
+        return new HealthCheckResponse(host, output);
     }
 
     @PostMapping
@@ -114,6 +155,9 @@ public class ContentController {
         public static ContentDetail from(Content content, List<Comment> comments) {
             return new ContentDetail(ContentResponse.from(content), comments.stream().map(CommentResponse::from).toList());
         }
+    }
+
+    public record HealthCheckResponse(String host, List<String> output) {
     }
 
     public record CommentResponse(Long id, String authorName, String message, Instant createdAt) {
