@@ -1,7 +1,5 @@
 package com.example.cicdpractice.content;
 
-import com.example.cicdpractice.user.Role;
-import com.example.cicdpractice.user.UserAccount;
 import com.example.cicdpractice.user.UserPrincipal;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -9,7 +7,6 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import java.time.Instant;
 import java.util.List;
-import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.server.ResponseStatusException;
@@ -68,7 +65,6 @@ public class ContentController {
     @PreAuthorize("hasAnyRole('ADMIN', 'EDITOR')")
     public ContentResponse update(@AuthenticationPrincipal UserPrincipal principal, @PathVariable Long id, @Valid @RequestBody ContentRequest request) {
         Content content = contents.findById(id).orElseThrow();
-        assertCanEdit(principal.account(), content);
         content.update(request.title(), request.body(), request.status());
         return ContentResponse.from(contents.save(content));
     }
@@ -78,13 +74,6 @@ public class ContentController {
         Content content = contents.findById(id).orElseThrow();
         Comment comment = comments.save(Comment.create(content, principal.account(), request.message()));
         return CommentResponse.from(comment);
-    }
-
-    private void assertCanEdit(UserAccount actor, Content content) {
-        if (actor.getRole() == Role.ADMIN || content.getAuthor().getId().equals(actor.getId())) {
-            return;
-        }
-        throw new AccessDeniedException("Only admins or authors can edit content");
     }
 
     public record ContentRequest(
