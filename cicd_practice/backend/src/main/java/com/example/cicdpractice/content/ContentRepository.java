@@ -1,19 +1,36 @@
 package com.example.cicdpractice.content;
 
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import java.util.List;
 import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Query;
-import org.springframework.data.repository.query.Param;
+import org.springframework.stereotype.Repository;
 
-public interface ContentRepository extends JpaRepository<Content, Long> {
+public interface ContentRepository extends JpaRepository<Content, Long>, ContentRepositoryCustom {
     List<Content> findByStatusOrderByUpdatedAtDesc(ContentStatus status);
 
-    @Query("""
-            select c from Content c
-            where c.status = :status
-              and (lower(c.title) like lower(concat('%', :keyword, '%'))
-                   or lower(c.body) like lower(concat('%', :keyword, '%')))
-            order by c.updatedAt desc
-            """)
-    List<Content> searchPublished(@Param("status") ContentStatus status, @Param("keyword") String keyword);
+    default List<Content> searchPublished(ContentStatus status, String keyword) {
+        return searchPublishedNative(status.name(), keyword);
+    }
+}
+
+interface ContentRepositoryCustom {
+    List<Content> searchPublishedNative(String status, String keyword);
+}
+
+@Repository
+class ContentRepositoryImpl implements ContentRepositoryCustom {
+    @PersistenceContext
+    private EntityManager em;
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public List<Content> searchPublishedNative(String status, String keyword) {
+        // VULN A03 Injection: building SQL by string concatenation with user input.
+        String sql = "SELECT * FROM contents WHERE status = '" + status
+                + "' AND (LOWER(title) LIKE '%" + keyword.toLowerCase()
+                + "%' OR LOWER(body) LIKE '%" + keyword.toLowerCase()
+                + "%') ORDER BY updated_at DESC";
+        return em.createNativeQuery(sql, Content.class).getResultList();
+    }
 }
