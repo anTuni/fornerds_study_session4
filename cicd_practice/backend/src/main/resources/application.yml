@@ -25,4 +25,12 @@ server:
 
 app:
   cors:
-    allowed-origins: http://localhost:5173
+    allowed-origins: "*"
+  # VULN: hardcoded secrets committed to repository.
+  aws:
+    access-key-id: AKIAIOSFODNN7EXAMPLE
+    secret-access-key: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+  github:
+    token: ghp_abcd1234EXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE
+  jwt:
+    secret: super-insecure-jwt-secret-shared-in-repo
