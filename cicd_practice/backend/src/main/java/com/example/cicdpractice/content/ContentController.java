@@ -28,18 +28,31 @@ import org.springframework.web.bind.annotation.RestController;
 public class ContentController {
     private final ContentRepository contents;
     private final CommentRepository comments;
+    private final ContentSearchService searchService;
 
-    public ContentController(ContentRepository contents, CommentRepository comments) {
+    public ContentController(ContentRepository contents, CommentRepository comments, ContentSearchService searchService) {
         this.contents = contents;
         this.comments = comments;
+        this.searchService = searchService;
     }
 
     @GetMapping
-    public List<ContentResponse> list(@RequestParam(defaultValue = "") String q) {
-        List<Content> result = q.isBlank()
-                ? contents.findByStatusOrderByUpdatedAtDesc(ContentStatus.PUBLISHED)
-                : contents.searchPublished(ContentStatus.PUBLISHED, q);
+    public List<ContentResponse> list(@RequestParam(defaultValue = "") String q,
+                                      @RequestParam(defaultValue = "false") boolean fast) {
+        List<Content> result;
+        if (q.isBlank()) {
+            result = contents.findByStatusOrderByUpdatedAtDesc(ContentStatus.PUBLISHED);
+        } else if (fast) {
+            result = searchService.searchByKeyword(q);
+        } else {
+            result = contents.searchPublished(ContentStatus.PUBLISHED, q);
+        }
         return result.stream().map(ContentResponse::from).toList();
+    }
+
+    @GetMapping("/by-author")
+    public List<ContentResponse> byAuthor(@RequestParam String name) {
+        return searchService.searchByAuthorName(name).stream().map(ContentResponse::from).toList();
     }
 
     @GetMapping("/{id}")
