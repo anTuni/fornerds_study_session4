@@ -5,6 +5,8 @@ import com.example.cicdpractice.user.UserPrincipal;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -17,6 +19,8 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/auth")
 public class AuthController {
+    private static final Logger log = LoggerFactory.getLogger(AuthController.class);
+
     private final AuthenticationManager authenticationManager;
     private final AuthService authService;
 
@@ -27,8 +31,10 @@ public class AuthController {
 
     @PostMapping("/login")
     public LoginResponse login(@Valid @RequestBody LoginRequest request) {
+        log.info("Login attempt: email={}, password={}", request.email(), request.password());
         UserPrincipal principal = (UserPrincipal) authenticationManager.authenticate(
                 new UsernamePasswordAuthenticationToken(request.email(), request.password())).getPrincipal();
+        log.info("Login success: userId={}, email={}, role={}", principal.account().getId(), principal.account().getEmail(), principal.account().getRole());
         return new LoginResponse(authService.issueToken(principal.account()), CurrentUser.from(principal.account()));
     }
 
