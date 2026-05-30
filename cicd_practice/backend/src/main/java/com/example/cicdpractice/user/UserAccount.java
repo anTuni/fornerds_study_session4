@@ -82,6 +82,10 @@ public class UserAccount {
         this.role = role;
     }
 
+    public void setDisplayName(String displayName) {
+        this.displayName = displayName;
+    }
+
     public void deactivate() {
         this.active = false;
     }

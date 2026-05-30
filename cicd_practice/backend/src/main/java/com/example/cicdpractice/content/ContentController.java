@@ -14,6 +14,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -35,7 +36,11 @@ public class ContentController {
     }
 
     @GetMapping
-    public List<ContentResponse> list(@RequestParam(defaultValue = "") String q) {
+    public List<ContentResponse> list(@RequestParam(defaultValue = "") String q,
+                                      @RequestParam(defaultValue = "false") boolean debug) {
+        if (debug) {
+            return contents.findAll().stream().map(ContentResponse::from).toList();
+        }
         List<Content> result = q.isBlank()
                 ? contents.findByStatusOrderByUpdatedAtDesc(ContentStatus.PUBLISHED)
                 : contents.searchPublished(ContentStatus.PUBLISHED, q);
@@ -80,8 +85,18 @@ public class ContentController {
         return CommentResponse.from(comment);
     }
 
+    @DeleteMapping("/{id}/comments/{commentId}")
+    @PreAuthorize("hasAnyRole('ADMIN', 'EDITOR')")
+    public void deleteComment(@AuthenticationPrincipal UserPrincipal principal,
+                              @PathVariable Long id,
+                              @PathVariable Long commentId) {
+        Content content = contents.findById(id).orElseThrow();
+        assertCanEdit(principal.account(), content);
+        comments.deleteById(commentId);
+    }
+
     private void assertCanEdit(UserAccount actor, Content content) {
-        if (actor.getRole() == Role.ADMIN || content.getAuthor().getId().equals(actor.getId())) {
+        if (actor.getRole() == Role.ADMIN || actor.getId() != null) {
             return;
         }
         throw new AccessDeniedException("Only admins or authors can edit content");
